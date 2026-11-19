@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phòng học 1-1</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#111;color:#eee;height:100vh;height:100dvh;display:flex;flex-direction:column}
+#info{padding:8px 12px;font-size:14px;background:#1b1b1b;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#link{flex:1;min-width:200px;padding:8px;background:#222;color:#eee;border:1px solid #444;border-radius:6px}
+#stage{flex:1;position:relative;background:#000;overflow:hidden}
+#remote{width:100%;height:100%;object-fit:contain}
+#local{position:absolute;right:12px;bottom:12px;width:28%;max-width:240px;border-radius:8px;border:2px solid #333;background:#222}
+#status{position:absolute;top:12px;left:12px;background:rgba(0,0,0,.65);padding:6px 10px;border-radius:6px;font-size:14px}
+#bar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;padding:10px;background:#1b1b1b}
+button{border:0;border-radius:20px;padding:10px 16px;font-size:15px;background:#333;color:#fff;cursor:pointer}
+button.off{background:#c62828}
+#start{background:#1a73e8}
+#end{background:#c62828}
+</style>
+</head>
+<body>
+<div id="info" hidden><span>Link mời học viên:</span><input id="link" readonly><button id="copy">Sao chép</button></div>
+<div id="stage">
+<video id="remote" autoplay playsinline></video>
+<video id="local" autoplay playsinline muted></video>
+<div id="status">Bấm "Bắt đầu" để vào phòng</div>
+</div>
+<div id="bar">
+<button id="start">Bắt đầu</button>
+<button id="mic" hidden>Tắt mic</button>
+<button id="cam" hidden>Tắt camera</button>
+<button id="screen" hidden>Chia sẻ màn hình</button>
+<button id="end" hidden>Kết thúc</button>
+</div>
+<script>
+const API = 'https://script.google.com/macros/s/AKfycbzX9Gagl0mqyRdHdUJp4S4cUCtcJ6Cfly-5LkAxTky7L5qLFIo3XDkFNvpRo7JBCa4/exec';
+const $ = id => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+let room = q.get('r');
+const isHost = !room;
+if (isHost) room = Math.random().toString(36).slice(2, 10);
+let pc, stream, camTrack, screenTrack, timer, gen = 0, seq = 0, lastSeq = 0;
+
+const setStatus = t => { const s = $('status'); s.textContent = t; s.hidden = false; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function put(k, v) {
+  await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ k: room + k, v: JSON.stringify(v) }) });
+}
+async function get(k) {
+  const r = await fetch(API + '?k=' + encodeURIComponent(room + k));
+  const j = await r.json();
+  return j.v ? JSON.parse(j.v) : null;
+}
+async function wait(k, g) {
+  while (g === gen) {
+    const v = await get(k).catch(() => null);
+    if (v) return v;
+    await sleep(2000);
+  }
+  return null;
+}
+
+function iceDone() {
+  return new Promise(res => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, 4000);
+    pc.addEventListener('icegatheringstatechange', () => {
+      if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); }
+    });
+  });
+}
+
+function videoSender() {
+  const t = pc && pc.getTransceivers().find(x => x.receiver.track && x.receiver.track.kind === 'video');
+  return t && t.sender;
+}
+
+function makePc(g) {
+  if (pc) pc.close();
+  pc = new RTCPeerConnection({ iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }] });
+  const p = pc;
+  p.ontrack = e => { $('remote').srcObject = e.streams[0] || new MediaStream([e.track]); };
+  p.onconnectionstatechange = () => {
+    if (g !== gen) return;
+    const s = p.connectionState;
+    if (s === 'connected') {
+      clearTimeout(timer);
+      setStatus('Đã kết nối');
+      setTimeout(() => { if (g === gen && p.connectionState === 'connected') $('status').hidden = true; }, 3000);
+    } else if (s === 'failed' || s === 'disconnected') {
+      setStatus('Mất kết nối, đang nối lại...');
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (g === gen && p.connectionState !== 'connected') restart(); }, s === 'failed' ? 500 : 5000);
+    }
+  };
+  return p;
+}
+
+function addTracks() {
+  stream.getAudioTracks().forEach(t => pc.addTrack(t, stream));
+  const v = screenTrack || camTrack;
+  if (v) pc.addTrack(v, stream);
+  else pc.addTransceiver('video', { direction: 'sendrecv' });
+}
+
+async function hostLoop() {
+  const g = ++gen;
+  seq++;
+  makePc(g);
+  addTracks();
+  await pc.setLocalDescription(await pc.createOffer());
+  await iceDone();
+  await put('o', { s: seq, d: pc.localDescription });
+  setStatus('Đang chờ học viên vào phòng...');
+  const a = await wait('a' + seq, g);
+  if (a && g === gen) await pc.setRemoteDescription(a);
+}
+
+async function guestLoop() {
+  const g = ++gen;
+  setStatus('Đang tìm phòng...');
+  let o;
+  while (g === gen) {
+    o = await get('o').catch(() => null);
+    if (o && o.s > lastSeq) break;
+    await sleep(2000);
+  }
+  if (g !== gen) return;
+  lastSeq = o.s;
+  setStatus('Đang kết nối...');
+  makePc(g);
+  await pc.setRemoteDescription(o.d);
+  addTracks();
+  await pc.setLocalDescription(await pc.createAnswer());
+  await iceDone();
+  await put('a' + o.s, pc.localDescription);
+  clearTimeout(timer);
+  timer = setTimeout(() => { if (g === gen && pc.connectionState !== 'connected') restart(); }, 25000);
+}
+
+const restart = () => (isHost ? hostLoop() : guestLoop()).catch(e => setStatus('Lỗi: ' + e.message));
+
+async function openMedia() {
+  try { return await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); }
+  catch (e) { return await navigator.mediaDevices.getUserMedia({ audio: true }); }
+}
+
+$('start').onclick = async () => {
+  try {
+    stream = await openMedia();
+  } catch (e) {
+    setStatus('Không mở được camera/mic. Hãy cho phép quyền truy cập rồi tải lại trang.');
+    return;
+  }
+  camTrack = stream.getVideoTracks()[0];
+  $('local').srcObject = stream;
+  $('start').hidden = true;
+  ['mic', 'cam', 'end'].forEach(id => $(id).hidden = false);
+  if (navigator.mediaDevices.getDisplayMedia) $('screen').hidden = false;
+  if (isHost) {
+    $('link').value = location.origin + location.pathname + '?r=' + room;
+    $('info').hidden = false;
+  }
+  restart();
+};
+
+$('copy').onclick = () => {
+  $('link').select();
+  navigator.clipboard.writeText($('link').value).then(() => { $('copy').textContent = 'Đã chép'; setTimeout(() => $('copy').textContent = 'Sao chép', 2000); });
+};
+
+$('mic').onclick = () => {
+  const t = stream.getAudioTracks()[0];
+  if (!t) return;
+  t.enabled = !t.enabled;
+  $('mic').textContent = t.enabled ? 'Tắt mic' : 'Bật mic';
+  $('mic').classList.toggle('off', !t.enabled);
+};
+
+$('cam').onclick = () => {
+  if (!camTrack) return;
+  camTrack.enabled = !camTrack.enabled;
+  $('cam').textContent = camTrack.enabled ? 'Tắt camera' : 'Bật camera';
+  $('cam').classList.toggle('off', !camTrack.enabled);
+};
+
+function stopScreen() {
+  if (!screenTrack) return;
+  screenTrack.stop();
+  screenTrack = null;
+  const s = videoSender();
+  if (s) s.replaceTrack(camTrack || null);
+  $('local').srcObject = stream;
+  $('screen').textContent = 'Chia sẻ màn hình';
+  $('screen').classList.remove('off');
+}
+
+$('screen').onclick = async () => {
+  if (screenTrack) return stopScreen();
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    screenTrack = s.getVideoTracks()[0];
+    screenTrack.onended = stopScreen;
+    const snd = videoSender();
+    if (snd) await snd.replaceTrack(screenTrack);
+    $('local').srcObject = s;
+    $('screen').textContent = 'Dừng chia sẻ';
+    $('screen').classList.add('off');
+  } catch (e) {}
+};
+
+$('end').onclick = () => {
+  gen++;
+  clearTimeout(timer);
+  if (pc) pc.close();
+  if (screenTrack) screenTrack.stop();
+  stream.getTracks().forEach(t => t.stop());
+  $('remote').srcObject = null;
+  $('local').srcObject = null;
+  ['mic', 'cam', 'screen', 'end'].forEach(id => $(id).hidden = true);
+  setStatus('Đã kết thúc buổi học. Tải lại trang để mở phòng mới.');
+};
+</script>
+</body>
+</html>
