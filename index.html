@@ -38,29 +38,50 @@ button.off{background:#c62828}
 const API = 'https://script.google.com/macros/s/AKfycbzX9Gagl0mqyRdHdUJp4S4cUCtcJ6Cfly-5LkAxTky7L5qLFIo3XDkFNvpRo7JBCa4/exec';
 const $ = id => document.getElementById(id);
 const q = new URLSearchParams(location.search);
+const rid = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), x => 'abcdefghijklmnopqrstuvwxyz0123456789'[x % 36]).join('');
+const store = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} } };
 let room = q.get('r');
 const isHost = !room;
-if (isHost) room = Math.random().toString(36).slice(2, 10);
+let hk = q.get('h') || store.get('hk');
+if (q.get('h')) { store.set('hk', q.get('h')); history.replaceState(null, '', location.pathname); }
+if (isHost) room = rid(10);
+let gid = store.get('g_' + room);
+if (!isHost && !gid) { gid = rid(12); store.set('g_' + room, gid); }
 let pc, stream, camTrack, screenTrack, timer, gen = 0, seq = 0, lastSeq = 0;
 
 const setStatus = t => { const s = $('status'); s.textContent = t; s.hidden = false; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const NOT_HOST = 'Chỉ giáo viên mới mở được phòng. Nếu bạn là học viên, hãy mở link mời giáo viên gửi.';
 
-async function put(k, v) {
-  await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ k: room + k, v: JSON.stringify(v) }) });
+async function put(t, v) {
+  const r = await fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ r: room, t, v: JSON.stringify(v), h: hk, g: gid }) });
+  return r.json();
 }
-async function get(k) {
-  const r = await fetch(API + '?k=' + encodeURIComponent(room + k));
+async function get(t) {
+  const r = await fetch(API + '?r=' + room + '&t=' + t);
   const j = await r.json();
   return j.v ? JSON.parse(j.v) : null;
 }
-async function wait(k, g) {
+async function wait(t, g) {
   while (g === gen) {
-    const v = await get(k).catch(() => null);
+    const v = await get(t).catch(() => null);
     if (v) return v;
     await sleep(2000);
   }
   return null;
+}
+
+function stopAll(msg) {
+  gen++;
+  clearTimeout(timer);
+  if (pc) pc.close();
+  if (screenTrack) screenTrack.stop();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  $('remote').srcObject = null;
+  $('local').srcObject = null;
+  ['mic', 'cam', 'screen', 'end'].forEach(id => $(id).hidden = true);
+  $('info').hidden = true;
+  setStatus(msg);
 }
 
 function iceDone() {
@@ -113,7 +134,8 @@ async function hostLoop() {
   addTracks();
   await pc.setLocalDescription(await pc.createOffer());
   await iceDone();
-  await put('o', { s: seq, d: pc.localDescription });
+  const r = await put('o', { s: seq, d: pc.localDescription });
+  if (!r.ok) { store.set('hk', null); return stopAll(NOT_HOST); }
   setStatus('Đang chờ học viên vào phòng...');
   const a = await wait('a' + seq, g);
   if (a && g === gen) await pc.setRemoteDescription(a);
@@ -121,7 +143,7 @@ async function hostLoop() {
 
 async function guestLoop() {
   const g = ++gen;
-  setStatus('Đang tìm phòng...');
+  setStatus('Đang chờ giáo viên mở phòng...');
   let o;
   while (g === gen) {
     o = await get('o').catch(() => null);
@@ -136,7 +158,8 @@ async function guestLoop() {
   addTracks();
   await pc.setLocalDescription(await pc.createAnswer());
   await iceDone();
-  await put('a' + o.s, pc.localDescription);
+  const r = await put('a' + o.s, pc.localDescription);
+  if (r.err === 'locked') return stopAll('Phòng này đã có học viên khác vào. Bạn không thể tham gia.');
   clearTimeout(timer);
   timer = setTimeout(() => { if (g === gen && pc.connectionState !== 'connected') restart(); }, 25000);
 }
@@ -148,7 +171,13 @@ async function openMedia() {
   catch (e) { return await navigator.mediaDevices.getUserMedia({ audio: true }); }
 }
 
+if (isHost && !hk) { $('start').hidden = true; setStatus(NOT_HOST); }
+
 $('start').onclick = async () => {
+  if (isHost) {
+    const v = await put('v', 1).catch(() => ({ ok: false }));
+    if (!v.ok) { store.set('hk', null); $('start').hidden = true; return setStatus(NOT_HOST); }
+  }
   try {
     stream = await openMedia();
   } catch (e) {
@@ -212,17 +241,7 @@ $('screen').onclick = async () => {
   } catch (e) {}
 };
 
-$('end').onclick = () => {
-  gen++;
-  clearTimeout(timer);
-  if (pc) pc.close();
-  if (screenTrack) screenTrack.stop();
-  stream.getTracks().forEach(t => t.stop());
-  $('remote').srcObject = null;
-  $('local').srcObject = null;
-  ['mic', 'cam', 'screen', 'end'].forEach(id => $(id).hidden = true);
-  setStatus('Đã kết thúc buổi học. Tải lại trang để mở phòng mới.');
-};
+$('end').onclick = () => stopAll('Đã kết thúc buổi học. Tải lại trang để mở phòng mới.');
 </script>
 </body>
 </html>
