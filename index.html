@@ -76,17 +76,27 @@ textarea{resize:vertical;min-height:76px}
 .qa .ghost{background:transparent;color:#cfd8d3;border-color:#3a473f}
 .qa .ghost:hover{background:#2b3a31}
 .qempty{color:#93a39a;text-align:center;padding:30px 10px;font-size:13px;line-height:1.6}
-.callmain{flex:1;display:flex;flex-direction:column;min-width:0}
+.callmain{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;background:#000}
+body.incall .top{padding:4px 14px}
+body.incall .brand svg{width:26px;height:26px}
+body.incall .brand b{font-size:14px}
+body.incall .brand span{display:none}
+.callmain:fullscreen .bar{position:absolute;left:0;right:0;bottom:0;z-index:8;background:rgba(26,33,29,.92);opacity:0;transition:opacity .25s}
+.callmain:fullscreen.showbar .bar,.callmain:fullscreen .bar:hover{opacity:1}
+.callmain:fullscreen #sharingChip{top:auto;bottom:90px}
 #stage{flex:1;position:relative;overflow:hidden;background:#000}
 #rscr{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none;background:#000}
 .sharing #rscr{display:block}
 #rcamWrap{position:absolute;inset:0;background:#101512}
 #rcamWrap video{width:100%;height:100%;object-fit:contain}
-.sharing #rcamWrap{inset:auto;right:228px;bottom:14px;width:200px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:2px solid #2c3830;z-index:3}
+.sharing.wtiles #rscr{right:228px;width:auto}
+.sharing #rcamWrap{inset:auto;right:14px;top:14px;width:200px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:2px solid #2c3830;z-index:3}
 .sharing #rcamWrap video{object-fit:cover}
 #selfTile{position:absolute;right:14px;bottom:14px;width:200px;aspect-ratio:16/9;border-radius:12px;overflow:hidden;border:2px solid #2c3830;background:#101512;z-index:3}
 #selfTile video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
-.nocams #selfTile,.nocams.sharing #rcamWrap{display:none}
+.sharing #selfTile{top:136px;bottom:auto}
+.sharing #rcamWrap.off~#selfTile{top:14px}
+.nocams #selfTile,.nocams.sharing #rcamWrap,.sharing #rcamWrap.off,.sharing #selfTile.off{display:none}
 .avatar{position:absolute;inset:0;display:none;align-items:center;justify-content:center}
 .avatar span{width:96px;height:96px;border-radius:50%;background:var(--g);color:#fff;display:grid;place-items:center;font-size:34px;font-weight:700}
 .sharing .avatar span,#selfTile .avatar span{width:44px;height:44px;font-size:16px}
@@ -114,7 +124,9 @@ body.incall footer{display:none}
 .side{width:100%;max-height:42vh;border-right:0;border-bottom:1px solid #26302a}
 .call{flex-direction:column}
 #selfTile{width:120px}
-.sharing #rcamWrap{width:120px;right:142px}
+.sharing #rcamWrap{width:120px}
+.sharing.wtiles #rscr{right:142px}
+.sharing #selfTile{top:90px}
 .cb{min-width:56px;padding:8px}
 .cb span{display:none}
 .top{padding:8px 12px}
@@ -180,7 +192,7 @@ body.incall footer{display:none}
       </div>
       <div class="qbox" id="qBox"><div class="qempty">Chưa có học viên nào trong hàng chờ.</div></div>
     </aside>
-    <div class="callmain">
+    <div class="callmain" id="callmain">
       <div id="stage">
         <video id="rscr" autoplay playsinline muted></video>
         <div id="rcamWrap"><video id="rcam" autoplay playsinline muted></video><div class="avatar"><span id="rAvatar">?</span></div><span class="tag" id="rName"></span></div>
@@ -299,6 +311,7 @@ function makePc(g) {
       clearTimeout(timer);
       setStatus('Đã kết nối');
       sendState();
+      if (screenTrack) tuneScreen(sender(2));
       setTimeout(() => { if (g === gen && p.connectionState === 'connected') setStatus(''); }, 2500);
     } else if (s === 'failed' || s === 'disconnected') {
       setStatus('Mất kết nối, đang nối lại...');
@@ -371,7 +384,10 @@ const restart = () => (role === 'host' ? hostLoop() : guestLoop()).catch(e => se
 
 function render() {
   const connected = !!pc && pc.connectionState === 'connected';
-  $('stage').classList.toggle('sharing', connected && !!remote.scr);
+  const sharing = connected && !!remote.scr;
+  const tiles = !$('stage').classList.contains('nocams') && (remote.cam || (!!camTrack && camTrack.enabled));
+  $('stage').classList.toggle('sharing', sharing);
+  $('stage').classList.toggle('wtiles', sharing && tiles);
   $('rcamWrap').classList.toggle('off', !remote.cam);
   $('selfTile').classList.toggle('off', !camTrack || !camTrack.enabled);
   $('rName').textContent = remote.n || (role === 'host' ? (current ? current.n : '') : 'Giáo viên');
@@ -408,9 +424,36 @@ $('bCam').onclick = () => {
 };
 $('bTiles').onclick = () => { $('stage').classList.toggle('nocams'); updateButtons(); };
 $('bFull').onclick = () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {});
+  if (document.fullscreenElement) return document.exitFullscreen();
+  const el = $('callmain');
+  if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
 };
+document.addEventListener('fullscreenchange', () => {
+  const on = !!document.fullscreenElement;
+  $('bFull').classList.toggle('on', on);
+  $('bFull').querySelector('span').textContent = on ? 'Thoát toàn màn hình' : 'Toàn màn hình';
+  if (on) peekBar();
+});
+let barTimer;
+function peekBar() {
+  $('callmain').classList.add('showbar');
+  clearTimeout(barTimer);
+  barTimer = setTimeout(() => $('callmain').classList.remove('showbar'), 2500);
+}
+$('callmain').addEventListener('mousemove', () => { if (document.fullscreenElement) peekBar(); });
+$('callmain').addEventListener('touchstart', () => { if (document.fullscreenElement) peekBar(); }, { passive: true });
+
+function tuneScreen(snd) {
+  if (!snd || !snd.getParameters) return;
+  try {
+    const p = snd.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+    p.encodings[0].maxBitrate = 2500000;
+    p.degradationPreference = 'maintain-resolution';
+    snd.setParameters(p).catch(() => {});
+  } catch (e) {}
+}
 if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) $('bScreen').hidden = true;
 
 function stopScreen() {
@@ -425,11 +468,12 @@ function stopScreen() {
 $('bScreen').onclick = async () => {
   if (screenTrack) return stopScreen();
   try {
-    const s = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const s = await navigator.mediaDevices.getDisplayMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 15, max: 30 } } });
     screenTrack = s.getVideoTracks()[0];
+    if ('contentHint' in screenTrack) screenTrack.contentHint = 'detail';
     screenTrack.onended = stopScreen;
     const snd = sender(2);
-    if (snd) await snd.replaceTrack(screenTrack);
+    if (snd) { await snd.replaceTrack(screenTrack); tuneScreen(snd); }
     sendState();
     updateButtons();
   } catch (e) {}
